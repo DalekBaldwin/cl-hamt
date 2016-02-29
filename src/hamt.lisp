@@ -120,3 +120,5 @@
             (%hamt-reduce func child r))
           (table-array node)
           :initial-value initial-value))
+
+(defgeneric %hamt-divide (node size))

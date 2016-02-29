@@ -13,6 +13,7 @@
    #:dict-map-values
    #:dict-map-keys
    #:dict-filter
+   #:dict-divide
 
    ;; Functions for operating on sets
    #:empty-set

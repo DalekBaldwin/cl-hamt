@@ -126,7 +126,99 @@
                  r)))
     (f (conflict-entries node) initial-value)))
 
+(defun integer->bit-list (integer)
+  (let ((bits nil))
+    (dotimes (position (integer-length integer) bits)
+      (push (ldb (byte 1 position) integer) bits))))
 
+(defun bit-list->integer (bit-list)
+  (reduce (lambda (accum item)
+            (+ (ash accum 1) item))
+          bit-list
+          :initial-value 0))
+
+
+;; this case should never occur
+(defmethod %hamt-divide ((node dict-leaf) size)
+  (declare (ignore node size))
+  (error "should never get here"))
+
+;; this case should be exceedingly rare, occurring only when all elements in
+;; the dict have the exact same hash
+(defmethod %hamt-divide ((node dict-conflict) size)
+  (with-slots (hash entries) node
+    (case size
+      ((0 1)
+       (error "should never get here"))
+      (2
+       (destructuring-bind ((first-key . first-value)
+                            (second-key . second-value))
+           entries
+         (values
+          (make-instance
+           'dict-leaf
+           :key first-key
+           :value first-value)
+          (make-instance
+           'dict-leaf
+           :key second-key
+           :value second-value))))
+      (otherwise
+       (destructuring-bind ((first-key . first-value) . rest-entries)
+           entries
+         (values
+          (make-instance
+           'dict-leaf
+           :key first-key
+           :value first-value)
+          (make-instance
+           'dict-conflict
+           :hash hash
+           :entries rest-entries)))))))
+
+(defmethod %hamt-divide ((node dict-table) size)
+  (with-slots (bitmap table) node
+    (let ((array-size (length table)))
+      (case array-size
+        (1
+         (multiple-value-bind (sub-left sub-right)
+             (%hamt-divide (first table) size)
+           (values
+            (make-instance
+             'dict-table
+             :bitmap bitmap
+             :table (vector sub-left))
+            (make-instance
+             'dict-table
+             :bitmap bitmap
+             :table (vector sub-right)))))
+        (otherwise
+         (let ((left-size (floor array-size 2)))
+           (let ((bit-list (integer->bit-list bitmap)))
+             (labels ((get-right-bitmap (bit-list ones-count)
+                        (cond
+                          ((= ones-count left-size)
+                           (bit-list->integer bit-list))
+                          (t
+                           (destructuring-bind (first-bit . rest-bits)
+                               bit-list
+                             (case first-bit
+                               (0
+                                (get-right-bitmap rest-bits ones-count))
+                               (otherwise
+                                (get-right-bitmap rest-bits
+                                                  (1+ ones-count)))))))))
+               (let* ((right-bitmap (get-right-bitmap bit-list 0))
+                      (left-bitmap (- bitmap right-bitmap)))
+                 (values
+                  (make-instance
+                   'dict-table
+                   :bitmap left-bitmap
+                   :table (subseq table 0 left-size))
+                  (make-instance
+                   'dict-table
+                   :bitmap right-bitmap
+                   :table (subseq table left-size))))))))))))
 
 ;; Wrapper dictionary class
 (defclass hash-dict (hamt)
@@ -246,3 +338,35 @@ given predicate."
                  (acons k v alist))
                dict
                '()))
+
+(defun dict-divide (dict)
+  "Split a dict into two separate and hopefully comparably-sized dicts.
+Respects the interface of DIVIDE on PURE:<FINITE-COLLECTION>."
+  (with-slots (test hash) dict
+    (let ((size (dict-size dict)))
+      (case size
+        (0
+         (values dict dict))
+        (1
+         (values
+          (make-instance
+           'hash-dict
+           :test test
+           :hash hash)
+          dict))
+        (otherwise
+         (multiple-value-bind (left-table right-table)
+             (%hamt-divide (hamt-table dict) size)
+           (with-slots ((left-bitmap bitmap)) left-table
+             (with-slots ((right-bitmap bitmap)) right-table
+               (values
+                (make-instance
+                 'hash-dict
+                 :test test
+                 :hash hash
+                 :table left-table)
+                (make-instance
+                 'hash-dict
+                 :test test
+                 :hash hash
+                 :table right-table))))))))))
